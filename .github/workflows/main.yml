@@ -1,0 +1,150 @@
+# Use this in your GitHub Actions job that builds & pushes Docker images to ACR.
+- name: Login to Azure with OIDC
+  uses: azure/login@v2
+  with:
+    client-id: ${{ secrets.AZURE_CLIENT_ID }}        # optional if using service principal
+    tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+    subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    allow-no-subscriptions: true
+    enable-oidc: true
+
+- name: Login to ACR (az acr login)
+  run: |
+    az acr login --name ${{ env.ACR_NAME }}
+- name: Build and push Docker image
+  uses: docker/build-push-action@v5
+  with:
+    push: true
+    tags: ${{ env.ACR_LOGIN_SERVER }}/nia-decision-engine:${{ github.sha }}
+<#
+.SYNOPSIS
+  Create an Azure VM for self-hosted GitHub Actions runner and register it with the repo.
+.NOTES
+  Requires: Az CLI, GitHub Personal Access Token (repo_admin actions runner registration)
+#>
+
+param(
+  [Parameter(Mandatory=$true)][string]$SubscriptionId,
+  [Parameter(Mandatory=$true)][string]$ResourceGroup,
+  [Parameter(Mandatory=$true)][string]$RunnerName,
+  [Parameter(Mandatory=$true)][string]$GitHubOwner,   # e.g. Jazzu72 or org name
+  [Parameter(Mandatory=$true)][string]$Repository,    # repository name
+  [Parameter(Mandatory=$true)][string]$RunnerToken,   # GitHub PAT for actions:admin:repo (or use repo-specific token)
+  [string]$Location = "eastus",
+  [string]$VmSize = "Standard_B2s",
+  [string]$AdminUsername = "azureuser"
+)
+
+az account set --subscription $SubscriptionId
+az group create --name $ResourceGroup --location $Location
+
+# Create VM (Ubuntu)
+$vm = az vm create `
+  --resource-group $ResourceGroup `
+  --name $RunnerName `
+  --image UbuntuLTS `
+  --size $VmSize `
+  --admin-username $AdminUsername `
+  --generate-ssh-keys `
+  --output json | ConvertFrom-Json
+
+$publicIp = az vm list-ip-addresses --name $RunnerName --resource-group $ResourceGroup --query "[].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv
+
+# Prepare registration script to run on VM (cloud-init style)
+$runnerScript = @"
+#!/bin/bash
+set -e
+apt-get update
+apt-get install -y git curl jq build-essential libssl-dev libffi-dev python3 python3-pip
+cd /home/$AdminUsername
+# Download runner package (use latest)
+RUNNER_VERSION=$(curl -s https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name)
+curl -Lo actions-runner.tar.gz https://github.com/actions/runner/releases/download/$RUNNER_VERSION/actions-runner-linux-x64-$RUNNER_VERSION.tar.gz
+mkdir actions-runner && tar xzf actions-runner.tar.gz -C actions-runner
+cd actions-runner
+./config.sh --url https://github.com/$GitHubOwner/$Repository --token $RunnerToken --unattended --name $RunnerName --work _work
+./svc.sh install
+./svc.sh start
+"@
+
+# Upload and run script via az vm run-command
+$scriptFile = "/tmp/register-runner.sh"
+$localScript = [IO.Path]::GetTempFileName()
+Set-Content -Path $localScript -Value $runnerScript -Force -Encoding UTF8
+
+az vm run-command invoke `
+  --command-id RunShellScript `
+  --name $RunnerName `
+  --resource-group $ResourceGroup `
+  --scripts @($runnerScript)
+
+Write-Host "Self-hosted runner deployed and registration attempted. Public IP: $publicIp"
+<#
+Install External Secrets Operator and configure Azure secret store/provider
+Requires: kubectl, helm, az login
+#>
+
+param(
+  [Parameter(Mandatory=$true)][string]$ResourceGroup,
+  [Parameter(Mandatory=$true)][string]$KeyVaultName,
+  [Parameter(Mandatory=$true)][string]$AksClusterName,
+  [Parameter(Mandatory=$true)][string]$AksResourceGroup,
+  [string]$Namespace = "external-secrets"
+)
+
+# Add helm repo for external-secrets
+helm repo add external-secrets https://charts.external-secrets.io
+helm repo update
+
+kubectl create namespace $Namespace -o yaml --dry-run=client | kubectl apply -f -
+
+helm upgrade --install external-secrets external-secrets/external-secrets -n $Namespace --wait
+
+# Create Azure service principal or use managed identity; here we create a service principal (alternative: use Azure workload identity)
+$sp = az ad sp create-for-rbac --name "esa-$KeyVaultName-$(Get-Random)" --role Reader --scopes "/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$ResourceGroup/providers/Microsoft.KeyVault/vaults/$KeyVaultName" -o json | ConvertFrom-Json
+
+# Save SP data into Kubernetes secret (in external-secrets namespace)
+$azTenant = $sp.appOwnerTenantId
+$azClientId = $sp.appId
+$azClientSecret = $sp.password
+
+kubectl create secret generic azure-kv-credentials -n $Namespace `
+  --from-literal=clientId=$azClientId `
+  --from-literal=clientSecret=$azClientSecret `
+  --from-literal=tenantId=$azTenant
+
+Write-Host "Created SP and secret for External Secrets. Next: create SecretStore CR referencing this secret and your KeyVault."
+# SecretStore (apply after running above)
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata:
+  name: azure-keyvault
+  namespace: external-secrets
+spec:
+  provider:
+    azurekv:
+      tenantId: "<TENANT_ID>"
+      clientId: "<CLIENT_ID>"
+      clientSecret:
+        secretRef:
+          name: azure-kv-credentials
+          key: clientSecret
+      vaultUrl: "https://<your-keyvault-name>.vault.azure.net/"
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: nia-xai-key
+  namespace: nia-prod
+spec:
+  refreshInterval: 1h
+  secretStoreRef: 
+    name: azure-keyvault
+    kind: SecretStore
+  target:
+    name: nia-xai-key
+    creationPolicy: Owner
+  data:
+    - secretKey: xai_api_key
+      remoteRef:
+        key: "NIA-API-KEY"   # KeyVault secret name
+./provision-aks-and-bootstrap.ps1 -SubscriptionId <sub> -ResourceGroup nia-rg -ClusterName nia-aks -GitRepo https://github.com/Jazzu72/nia-gitops -InstallIngress -InstallCertManager
