@@ -1,0 +1,467 @@
+nia-infra (Terraform + Flux)
+nia-decision-engine (app + helm)
+nia-platform (cross-env cluster mgmt)
+clusters/
+  prod/
+  staging/
+  dev/
+terraform/
+├── README.md
+├── versions.tf
+├── providers.tf
+├── backend.tf        # optional remote state bootstrap (run once)
+├── main.tf           # root that calls modules
+├── variables.tf
+├── outputs.tf
+├── modules/
+│   ├── network/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   ├── acr/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   ├── keyvault/
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   └── aks/# Terraform: NIA Platform (Azure) - Starter
+
+This Terraform repo provisions:
+
+- Virtual network + subnets
+- Azure Container Registry (private)
+- Azure Key Vault
+- Azure Kubernetes Service (AKS) private cluster with managed identity and OIDC enabled
+- Role assignment so AKS can pull from ACR
+- Outputs for kubeconfig, ACR login server, KeyVault
+
+## Quickstart
+
+1. Install Terraform (>= 1.5.0), Azure CLI, and login: `az login`
+2. Create or set a resource group for remote state (or edit backend.tf)
+3. Initialize:
+
+```bash
+cd terraform
+terraform init
+terraform plan -var="subscription_id=..." -var="location=eastus" -var="prefix=nia"
+terraform apply -var="subscription_id=..." -var="location=eastus" -var="prefix=nia"
+az aks get-credentials --resource-group <rg> --name <aks-name> --admin
+# Terraform: NIA Platform (Azure) - Starter
+
+This Terraform repo provisions:
+
+- Virtual network + subnets
+- Azure Container Registry (private)
+- Azure Key Vault
+- Azure Kubernetes Service (AKS) private cluster with managed identity and OIDC enabled
+- Role assignment so AKS can pull from ACR
+- Outputs for kubeconfig, ACR login server, KeyVault
+
+## Quickstart
+
+1. Install Terraform (>= 1.5.0), Azure CLI, and login: `az login`
+2. Create or set a resource group for remote state (or edit backend.tf)
+3. Initialize:
+
+---
+
+## `terraform/versions.tf`
+
+```hcl
+terraform {
+  required_version = ">= 1.4.0"
+
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = ">= 3.60.0"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.5.0"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = ">= 2.14.0"
+    }
+  }
+}provider "azurerm" {
+  features {}
+  subscription_id = var.subscription_id
+  tenant_id       = var.tenant_id
+}
+
+# optional kubernetes provider for post-deploy resources (Flux bootstrap separate)
+provider "kubernetes" {
+  host                   = azurerm_kubernetes_cluster.aks.kube_config[0].host
+  client_certificate     = base64decode(azurerm_kubernetes_cluster.aks.kube_config[0].client_certificate)
+  client_key             = base64decode(azurerm_kubernetes_cluster.aks.kube_config[0].client_key)
+  cluster_ca_certificate = base64decode(azurerm_kubernetes_cluster.aks.kube_config[0].cluster_ca_certificate)
+  load_config_file       = false
+}
+# Example: configure remote backend (uncomment to enable after you create storage)
+# terraform {
+#   backend "azurerm" {
+#     resource_group_name  = "nia-tfstate-rg"
+#     storage_account_name = "niatfstate"
+#     container_name       = "tfstate"
+#     key                  = "nia-terraform.tfstate"
+#   }
+# }
+variable "subscription_id" {
+  type        = string
+  description = "Azure subscription id"
+}
+
+variable "tenant_id" {
+  type        = string
+  description = "Azure tenant id"
+  default     = ""
+}
+
+variable "location" {
+  type        = string
+  description = "Azure region"
+  default     = "eastus"
+}
+
+variable "prefix" {
+  type        = string
+  description = "Resource name prefix"
+  default     = "nia"
+}
+
+variable "env" {
+  type        = string
+  description = "Deployment environment (dev/staging/prod)"
+  default     = "dev"
+}
+
+variable "node_count" {
+  type    = number
+  default = 3
+}
+
+variable "node_size" {
+  type    = string
+  default = "Standard_D2s_v3"
+}
+locals {
+  name_prefix = "${var.prefix}-${var.env}"
+  resource_group_name = "${local.name_prefix}-rg"
+}
+
+resource "azurerm_resource_group" "rg" {
+  name     = local.resource_group_name
+  location = var.location
+  tags = {
+    environment = var.env
+    project     = var.prefix
+  }
+}
+
+module "network" {
+  source      = "./modules/network"
+  prefix      = local.name_prefix
+  location    = var.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
+
+module "acr" {
+  source      = "./modules/acr"
+  prefix      = local.name_prefix
+  location    = var.location
+  resource_group_name = azurerm_resource_group.rg.name
+  sku         = "Standard"
+}
+
+module "keyvault" {
+  source      = "./modules/keyvault"
+  prefix      = local.name_prefix
+  location    = var.location
+  resource_group_name = azurerm_resource_group.rg.name
+  tenant_id   = var.tenant_id
+}
+
+module "aks" {
+  source                 = "./modules/aks"
+  prefix                 = local.name_prefix
+  location               = var.location
+  resource_group_name    = azurerm_resource_group.rg.name
+  vnet_subnet_id         = module.network.aks_subnet_id
+  node_count             = var.node_count
+  node_size              = var.node_size
+  acr_id                 = module.acr.acr_id
+  keyvault_id            = module.keyvault.keyvault_id
+  tenant_id              = var.tenant_id
+}
+output "resource_group_name" {
+  value = azurerm_resource_group.rg.name
+}
+
+output "aks_name" {
+  value = module.aks.aks_name
+}
+
+output "kubeconfig" {
+  value = module.aks.kube_config_raw
+  description = "Base64 kubeconfig. For convenience in CI; use az aks get-credentials in practice"
+  sensitive = true
+}
+
+output "acr_login_server" {
+  value = module.acr.acr_login_server
+}
+
+output "keyvault_uri" {
+  value = module.keyvault.keyvault_uri
+}
+resource "azurerm_virtual_network" "vnet" {
+  name                = "${var.prefix}-vnet"
+  address_space       = ["10.0.0.0/16"]
+  location            = var.location
+  resource_group_name = var.resource_group_name
+}
+
+resource "azurerm_subnet" "aks" {
+  name                 = "${var.prefix}-aks-subnet"
+  resource_group_name  = var.resource_group_name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.1.0/24"]
+  service_endpoints    = ["Microsoft.Storage"]
+}
+
+resource "azurerm_subnet" "aks_nodepool" {
+  name                 = "${var.prefix}-nodepool-subnet"
+  resource_group_name  = var.resource_group_name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.2.0/24"]
+}
+
+output "vnet_id" {
+  value = azurerm_virtual_network.vnet.id
+}
+
+output "aks_subnet_id" {
+  value = azurerm_subnet.aks.id
+}
+
+output "nodepool_subnet_id" {
+  value = azurerm_subnet.aks_nodepool.id
+}
+variable "prefix" { type = string }
+variable "location" { type = string }
+variable "resource_group_name" { type = string }
+output "vnet_id" { value = azurerm_virtual_network.vnet.id }
+output "aks_subnet_id" { value = azurerm_subnet.aks.id }
+output "nodepool_subnet_id" { value = azurerm_subnet.aks_nodepool.id }
+resource "azurerm_container_registry" "acr" {
+  name                = "${var.prefix}acr"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku                 = var.sku
+  admin_enabled       = false
+  georeplications_enabled = false
+  tags = {
+    project = var.prefix
+  }
+}
+
+# Get login server
+output "acr_login_server" {
+  value = azurerm_container_registry.acr.login_server
+}
+
+output "acr_id" {
+  value = azurerm_container_registry.acr.id
+}
+output "vnet_id" { value = azurerm_virtual_network.vnet.id }
+output "aks_subnet_id" { value = azurerm_subnet.aks.id }
+output "nodepool_subnet_id" { value = azurerm_subnet.aks_nodepool.id }
+resource "azurerm_container_registry" "acr" {
+  name                = "${var.prefix}acr"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku                 = var.sku
+  admin_enabled       = false
+  georeplications_enabled = false
+  tags = {
+    project = var.prefix
+  }
+}
+
+# Get login server
+output "acr_login_server" {
+  value = azurerm_container_registry.acr.login_server
+}
+
+output "acr_id" {
+  value = azurerm_container_registry.acr.id
+}
+variable "prefix" { type = string }
+variable "resource_group_name" { type = string }
+variable "location" { type = string }
+variable "sku" { type = string }
+output "acr_id" { value = azurerm_container_registry.acr.id }
+output "acr_login_server" { value = azurerm_container_registry.acr.login_server }
+resource "azurerm_key_vault" "kv" {
+  name                        = "${var.prefix}-kv"
+  location                    = var.location
+  resource_group_name         = var.resource_group_name
+  sku_name                    = "standard"
+  tenant_id                   = var.tenant_id
+  purge_protection_enabled    = false
+  soft_delete_enabled         = true
+
+  access_policy {
+    tenant_id = var.tenant_id
+    object_id = data.azurerm_client_config.current.object_id
+
+    key_permissions = [
+      "get", "list"
+    ]
+
+    secret_permissions = [
+      "get", "list", "set"
+    ]
+  }
+}
+
+data "azurerm_client_config" "current" {}
+
+output "keyvault_id" {
+  value = azurerm_key_vault.kv.id
+}
+
+output "keyvault_uri" {
+  value = azurerm_key_vault.kv.vault_uri
+}
+variable "prefix" { type = string }
+variable "resource_group_name" { type = string }
+variable "location" { type = string }
+variable "tenant_id" { type = string }
+output "keyvault_id" { value = azurerm_key_vault.kv.id }
+output "keyvault_uri" { value = azurerm_key_vault.kv.vault_uri }
+# Managed identity for AKS
+resource "azurerm_user_assigned_identity" "aks_mi" {
+  name                = "${var.prefix}-aks-mi"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+}
+
+# AKS cluster
+resource "azurerm_kubernetes_cluster" "aks" {
+  name                = "${var.prefix}-aks"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  dns_prefix          = "${var.prefix}-aks"
+
+  default_node_pool {
+    name            = "agentpool"
+    node_count      = var.node_count
+    vm_size         = var.node_size
+    vnet_subnet_id  = var.vnet_subnet_id
+    max_pods        = 110
+    enable_auto_scaling = false
+  }
+
+  identity {
+    type = "UserAssigned"
+    user_assigned_identity_id = azurerm_user_assigned_identity.aks_mi.id
+  }
+
+  network_profile {
+    network_plugin    = "azure"
+    load_balancer_sku = "standard"
+    outbound_type     = "loadBalancer"
+  }
+
+  role_based_access_control {
+    enabled = true
+  }
+
+  oidc_issuer_enabled = true
+
+  lifecycle {
+    ignore_changes = [
+      default_node_pool[0].node_count,
+    ]
+  }
+
+  tags = {
+    environment = var.env
+    project     = var.prefix
+  }
+
+  depends_on = [
+    azurerm_user_assigned_identity.aks_mi
+  ]
+}
+
+# Assign AcrPull to AKS MI
+resource "azurerm_role_assignment" "acr_pull" {
+  scope                = var.acr_id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_user_assigned_identity.aks_mi.principal_id
+}
+
+# Grant access to Key Vault (get secrets) by assigning Key Vault access policy to MI
+resource "azurerm_key_vault_access_policy" "mi_kv_policy" {
+  key_vault_id = var.keyvault_id
+  tenant_id    = var.tenant_id
+  object_id    = azurerm_user_assigned_identity.aks_mi.principal_id
+
+  secret_permissions = ["get", "list"]
+}
+
+output "aks_name" {
+  value = azurerm_kubernetes_cluster.aks.name
+}
+
+# kubeconfig raw (base64) to be consumed by other automation; mark sensitive
+output "kube_config_raw" {
+  value     = azurerm_kubernetes_cluster.aks.kube_admin_config_raw
+  sensitive = true
+}
+variable "prefix" { type = string }
+variable "location" { type = string }
+variable "resource_group_name" { type = string }
+variable "vnet_subnet_id" { type = string }
+variable "node_count" { type = number }
+variable "node_size" { type = string }
+variable "acr_id" { type = string }
+variable "keyvault_id" { type = string }
+variable "tenant_id" { type = string }
+variable "env" { type = string, default = "dev" }
+output "aks_name" { value = azurerm_kubernetes_cluster.aks.name }
+output "kube_config_raw" { value = azurerm_kubernetes_cluster.aks.kube_admin_config_raw }
+resource "null_resource" "flux_bootstrap" {
+  provisioner "local-exec" {
+    command = <<EOT
+      export KUBECONFIG="$(pwd)/kubeconfig_temp"
+      az aks get-credentials --resource-group ${azurerm_resource_group.rg.name} --name ${module.aks.aks_name} --file $KUBECONFIG --overwrite-existing
+      flux bootstrap git \
+        --url="${var.gitops_repo_url}" \
+        --branch="${var.gitops_branch}" \
+        --path="./clusters/${var.env}" \
+        --namespace=flux-system \
+        --components-extra=image-reflector-controller,image-automation-controller \
+        --read-write-key
+    EOT
+  }
+
+  depends_on = [ module.aks ]
+}
+
+
+```bash
+cd terraform
+terraform init
+
+│       ├── main.tf
+│       ├── variables.tf
+│       └── outputs.tf
+└── flux_bootstrap.tf (optional local-exec to run flux bootstrap)
