@@ -1,4 +1,4 @@
-# Use this in your GitHub Actions job that builds & pushes Docker images to ACR.
+    # Use this in your GitHub Actions job that builds & pushes Docker images to ACR.
 - name: Login to Azure with OIDC
   uses: azure/login@v2
   with:
