@@ -1,0 +1,47 @@
+name: Build & Push Nia 2.0
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        uses: azure/docker-login@v2
+        with:
+          login-server: ${{ secrets.ACR_NAME }}.azurecr.io
+          username: ${{ secrets.ACR_NAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push Nia image
+        run: |
+          docker build . -t ${{ secrets.ACR_NAME }}.azurecr.io/nia-ceo/nia2:${{ github.sha }}
+          docker push ${{ secrets.ACR_NAME }}.azurecr.io/nia-ceo/nia2:${{ github.sha }}
+          docker tag ${{ secrets.ACR_NAME }}.azurecr.io/nia-ceo/nia2:${{ github.sha }} ${{ secrets.ACR_NAME }}.azurecr.io/nia-ceo/nia2:latest
+          docker push ${{ secrets.ACR_NAME }}.azurecr.io/nia-ceo/nia2:latest
+
+      - name: Update Flux image
+        run: |
+          flux create image update nia-ceo \
+            --repository-ref=flux-system \
+            --image=${{ secrets.ACR_NAME }}.azurecr.io/nia-ceo/nia2 \
+            --tag=latest \
+            --git-repo-path=clusters/prod \
+            --git-branch=main \
+            --author-name="Nia CI" \
+            --commit-message="Bump Nia to latest" \
+            --push  az ad sp create-for-rbac --name "nia-github-actions" --role contributor --scopes /subscriptions/YOUR-SUBSCRIPTION-ID/resourceGroups/YOUR-RG --sdk-auth  
