@@ -1,0 +1,71 @@
+replicaCount: 1
+
+image:
+  repository: youracr.azurecr.io/nia-ceo/nia2
+  tag: "prod-20251119"
+  pullPolicy: Always
+
+ingress:
+  enabled: true
+  hosts:
+    - host: nia.houseofjazzu.ai
+  tls:
+    - secretName: nia-tls
+      hosts: [nia.houseofjazzu.ai]
+
+envFrom:
+  - secretRef:
+      name: nia-secrets   # This secret will contain Twilio + LLM keys
+
+# SMS-specific config (exposed to the app)
+extraEnv:
+  - name: ENABLE_SMS
+    value: "true"
+  - name: TWILIO_PHONE_NUMBER
+    valueFrom:
+      secretKeyRef:
+        name: nia-secrets
+        key: TWILIO_PHONE_NUMBER
+  - name: NIA_PERSONAL_NUMBER   # ← Your private cell (she only replies to you)
+    valueFrom:
+      secretKeyRef:
+        name: nia-secrets
+        key: YOUR_CELL_NUMBER
+
+resources:
+  limits:# Replace with your real credentials
+kubectl create secret generic nia-secrets \
+  --namespace default \
+  --from-literal=CLAUDE_API_KEY=sk-ant-... \
+  --from-literal=OPENAI_API_KEY=sk-... \
+  --from-literal=TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+  --from-literal=TWILIO_AUTH_TOKEN=your_auth_token \
+  --from-literal=TWILIO_PHONE_NUMBER=+12125551234 \
+  --from-literal=YOUR_CELL_NUMBER=+12125559876   from fastapi import FastAPI, Request
+from twilio.twiml.messaging_response import MessagingResponse
+from nia.core.executor import NiaExecutor   # your god-tier agent suite
+import os
+
+app = FastAPI()
+executor = NiaExecutor()   # boots all 10 agents
+
+ALLOWED_NUMBER = os.getenv("YOUR_CELL_NUMBER")
+
+@app.post("/sms")
+async def sms_reply(request: Request):
+    form = await request.form()
+    from_number = form.get("From")
+    body = form.get("Body", "").strip()
+
+    # Security: only you can talk to her
+    if from_number != ALLOWED_NUMBER:
+        return "", 200
+
+    # Execute anything you text her
+    result = await executor.run_autonomous_task(f"user_sms: {body}")
+
+    resp = MessagingResponse()
+    resp.message(str(result))
+    return str(resp)# ← your real number
+    cpu: "4"
+    memory: "16Gi"
