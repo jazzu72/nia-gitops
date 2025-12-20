@@ -1,0 +1,117 @@
+# .github/workflows/test-basic.yml
+name: Test Basic Workflow
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Nia repo is reachable and Actions work"
+      - run: pwd && ls -la
+name: Build Nia Repository
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest   # PowerShell-native
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'   # Or whatever Nia uses
+
+      - name: Install Python Dependencies
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\Activate.ps1
+          pip install -r requirements.txt   # fastapi, uvicorn, xai-sdk, etc.
+
+      - name: Run Nia Build Script
+        shell: pwsh
+        run: |
+          ./build-nia-repo.ps1
+
+      # Optional: Deploy, test, etc. 
+# .github/workflows/test-basic.yml
+name: Test Basic Workflow
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Nia repo is reachable and Actions work"
+      - run: pwd && ls -la
+# .github/workflows/nia-autobuild.yml
+name: Nia AutoBuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      goal:
+        description: "What should Nia build?"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+      NIA_GITHUB_TOKEN: ${{ secrets.NIA_GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run AutoBuilder
+        shell: pwsh
+        run: |
+          ./scripts/Invoke-AutoBuild.ps1 -Goal "${{ inputs.goal }}"
+
+      - name: Create PR
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.NIA_GITHUB_TOKEN }}
+          branch: nia/autobuild-${{ github.run_id }}
+          title: "🧠 Nia: ${{ inputs.goal }}"
+          body: "Autonomous build triggered by creator"
+          labels: nia,
+- name: Run AutoBuilder
+  shell: pwsh
+  run: |
+    # CRITICAL: Always set working directory to repo root
+    Set-Location $env:GITHUB_WORKSPACE
+    
+    # Verify we're in the right place
+    Write-Host "Current directory: $(Get-Location)"
+    Write-Host "Contents:" 
+    Get-ChildItem -Name
+    
+    # Now run your script with full explicit path
+    & "$env:GITHUB_WORKSPACE/scripts/Invoke-AutoBuild.ps1" -Goal "${{ inputs.goal }}"
