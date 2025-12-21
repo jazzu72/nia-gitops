@@ -148,3 +148,118 @@ spec:
       remoteRef:
         key: "NIA-API-KEY"   # KeyVault secret name
 ./provision-aks-and-bootstrap.ps1 -SubscriptionId <sub> -ResourceGroup nia-rg -ClusterName nia-aks -GitRepo https://github.com/Jazzu72/nia-gitops -InstallIngress -InstallCertManager
+# .github/workflows/nia-autobuild.yml
+name: Nia AutoBuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      goal:
+        description: "What should Nia build or do?"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: windows-latest  # Best for PowerShell
+    env:
+      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+      NIA_VAULT_MASTER_KEY: ${{ secrets.NIA_VAULT_MASTER_KEY }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set Working Directory
+        shell: pwsh
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          Write-Host "🧠 Working from: $(Get-Location)"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies (if needed)
+        shell: pwsh
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          if (Test-Path "requirements.txt") {
+            python -m venv .venv
+            .\.venv\Scripts\Activate.ps1
+            pip install -r requirements.txt
+          }
+
+      - name: Run Nia AutoBuilder
+        shell: pwsh
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          Write-Host "🧠 Nia activating for goal: ${{ inputs.goal }}"
+          & "$env:GITHUB_WORKSPACE/scripts/Invoke-AutoBuild.ps1" -Goal "${{ inputs.goal }}"
+
+      - name: Create Pull Request
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.NIA_GITHUB_TOKEN }}
+          branch: nia/autobuild-${{ github.run_id }}
+          title: "
+          title: "🧠 Nia: ${{ inputs.goal }}"
+          # .github/workflows/nia-autobuild.yml
+name: Nia AutoBuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      goal:
+        description: "What should Nia build or do?"
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: windows-latest   # Best for PowerShell
+    env:
+      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+      NIA_VAULT_MASTER_KEY: ${{ secrets.NIA_VAULT_MASTER_KEY }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set Working Directory (Critical Fix)
+        shell: pwsh
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          Write-Host "Working from: $(Get-Location)"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run Nia AutoBuilder
+        shell: pwsh
+        run: |
+          Set-Location $env:GITHUB_WORKSPACE
+          & "$env:GITHUB_WORKSPACE/scripts/Invoke-AutoBuild.ps1" -Goal "${{ inputs.goal }}"
+
+      - name: Create Pull Request
+        if: success()
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.NIA_GITHUB_TOKEN }}
+          branch: nia/autobuild-${{ github.run_id }}
+          title: "🧠 Nia: ${{ inputs.goal }}"
+          body: "Autonomous evolution in progress"
